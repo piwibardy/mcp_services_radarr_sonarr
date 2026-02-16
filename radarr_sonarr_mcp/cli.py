@@ -92,12 +92,6 @@ def configure():
     return new_config
 
 
-def start(config_path=None):
-    """Start the MCP server."""
-    server = create_server(config_path)
-    server.start()
-
-
 def show_status():
     """Show the current status of the server."""
     try:
@@ -125,16 +119,27 @@ def main():
     # Start command
     start_parser = subparsers.add_parser("start", help="Start the MCP server")
     start_parser.add_argument("--config", help="Path to config.json file")
-    
+    start_parser.add_argument(
+        "--transport",
+        choices=["stdio", "streamable-http"],
+        help="Transport mode (overrides config)",
+    )
+    start_parser.add_argument("--port", type=int, help="Port for HTTP transport (overrides config)")
+
     # Status command
     status_parser = subparsers.add_parser("status", help="Show the server status")
-    
+
     args = parser.parse_args()
-    
+
     if args.command == "configure":
         configure()
     elif args.command == "start":
-        start(args.config)
+        server = create_server(args.config)
+        if args.transport:
+            server.config.server_config.transport = args.transport
+        if args.port:
+            server.config.server_config.port = args.port
+        server.run()
     elif args.command == "status":
         show_status()
     else:
