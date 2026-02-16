@@ -21,7 +21,7 @@ class TestRadarrSonarrMCPServer(unittest.TestCase):
 
     def setUp(self):
         """Set up test environment."""
-        # Create a temporary config file
+        # Create a temporary config file (uses backward-compat sonarrConfig format)
         self.temp_file = tempfile.NamedTemporaryFile(delete=False)
         config_data = {
             "nasConfig": {
@@ -44,7 +44,7 @@ class TestRadarrSonarrMCPServer(unittest.TestCase):
         }
         with open(self.temp_file.name, 'w') as f:
             json.dump(config_data, f)
-        
+
         # Create sample movie and series data
         self.sample_movies = [
             Movie(
@@ -150,10 +150,11 @@ class TestRadarrSonarrMCPServer(unittest.TestCase):
         """Test server initialization with config file."""
         server = create_server(self.temp_file.name)
         self.assertEqual(server.config.radarr_config.api_key, "test_radarr_api_key")
-        self.assertEqual(server.config.sonarr_config.api_key, "test_sonarr_api_key")
+        # Backward compat: sonarrConfig -> sonarr_configs["sonarr"]
+        self.assertIn("sonarr", server.config.sonarr_configs)
+        self.assertEqual(server.config.sonarr_configs["sonarr"].api_key, "test_sonarr_api_key")
         self.assertEqual(server.config.server_config.port, 5000)
-        
-        # Check that FastMCP was initialized correctly
+
         mock_fastmcp.assert_called_once()
         self.assertEqual(mock_fastmcp.call_args[1]['name'], "radarr-sonarr-mcp-server")
 
@@ -162,33 +163,26 @@ class TestRadarrSonarrMCPServer(unittest.TestCase):
     @patch('radarr_sonarr_mcp.server.FastMCP')
     def test_get_available_movies(self, mock_fastmcp, mock_sonarr_service, mock_radarr_service):
         """Test the get_available_movies tool."""
-        # Setup mocks
         mock_radarr_instance = mock_radarr_service.return_value
         mock_radarr_instance.get_all_movies.return_value = self.sample_movies
-        mock_radarr_instance.is_movie_watched.return_value = True
-        mock_radarr_instance.is_movie_in_watchlist.return_value = False
-        
+
         mock_server = mock_fastmcp.return_value
-        
-        # Create server and register tools
+
         server = create_server(self.temp_file.name)
-        
+
         # Extract the registered tool function
         tool_decorator = mock_server.tool.return_value
         get_movies_func = None
         for call in tool_decorator.call_args_list:
-            # The decorated function is passed to the decorator
             if call.args and call.args[0].__name__ == 'get_available_movies':
                 get_movies_func = call.args[0]
                 break
-        
+
         self.assertIsNotNone(get_movies_func, "get_available_movies tool not registered")
-        
-        # Test the tool function
+
         result = get_movies_func(year=2022)
         result_data = json.loads(result)
-        
-        # Check results
+
         self.assertEqual(result_data['count'], 1)
         self.assertEqual(result_data['movies'][0]['title'], "Test Movie 1")
         self.assertEqual(result_data['movies'][0]['year'], 2022)
@@ -198,33 +192,36 @@ class TestRadarrSonarrMCPServer(unittest.TestCase):
     @patch('radarr_sonarr_mcp.server.FastMCP')
     def test_get_available_series(self, mock_fastmcp, mock_radarr_service, mock_sonarr_service):
         """Test the get_available_series tool."""
-        # Setup mocks
         mock_sonarr_instance = mock_sonarr_service.return_value
         mock_sonarr_instance.get_all_series.return_value = self.sample_series
         mock_sonarr_instance.is_series_watched.return_value = True
-        mock_sonarr_instance.is_series_in_watchlist.return_value = False
-        
+
         mock_server = mock_fastmcp.return_value
-        
-        # Create server and register tools
+
         server = create_server(self.temp_file.name)
-        
-        # Extract the registered tool function
-        tool_decorator = mock_server.tool.return_value
+
+        # Extract the registered tool function (named "get_available_series" for sonarr instance)
+        tool_calls = mock_server.tool.call_args_list
         get_series_func = None
+        for call in tool_calls:
+            if call.kwargs.get("name") == "get_available_series":
+                # The decorator was called with name=, so the next call_args_list
+                # entry on the returned mock has the function
+                pass
+
+        # Try extracting from decorator call args
+        tool_decorator = mock_server.tool.return_value
         for call in tool_decorator.call_args_list:
-            # The decorated function is passed to the decorator
-            if call.args and call.args[0].__name__ == 'get_available_series':
+            if call.args and hasattr(call.args[0], '__name__') and call.args[0].__name__ == 'get_available':
+                # This could be either series or anime; check by calling
                 get_series_func = call.args[0]
                 break
-        
+
         self.assertIsNotNone(get_series_func, "get_available_series tool not registered")
-        
-        # Test the tool function
+
         result = get_series_func()
         result_data = json.loads(result)
-        
-        # Check results
+
         self.assertEqual(result_data['count'], 1)
         self.assertEqual(result_data['series'][0]['title'], "Test Series 1")
         self.assertEqual(result_data['series'][0]['year'], 2022)
@@ -234,38 +231,64 @@ class TestRadarrSonarrMCPServer(unittest.TestCase):
     @patch('radarr_sonarr_mcp.server.FastMCP')
     def test_server_resources(self, mock_fastmcp, mock_sonarr_service, mock_radarr_service):
         """Test registered resources."""
-        # Setup mocks
         mock_radarr_instance = mock_radarr_service.return_value
         mock_radarr_instance.get_all_movies.return_value = self.sample_movies
-        
+
         mock_sonarr_instance = mock_sonarr_service.return_value
         mock_sonarr_instance.get_all_series.return_value = self.sample_series
-        
+
         mock_server = mock_fastmcp.return_value
-        
-        # Create server and register resources
+
         server = create_server(self.temp_file.name)
 
-        # Mock get_resource_handler to return MagicMock objects
         mock_server_instance = mock_fastmcp.return_value
         mock_server_instance.get_resource_handler.side_effect = lambda path: MagicMock(return_value={
             '/movies': {"count": 2, "movies": self.sample_movies},
             '/series': {"count": 1, "series": self.sample_series}
         }.get(path))
 
-        # Test movies resource
         movies_resource = server.server.get_resource_handler('/movies')
         self.assertIsNotNone(movies_resource, "Movies resource not registered")
         result_movies = movies_resource()
         self.assertEqual(result_movies['count'], 2)
         self.assertEqual(len(result_movies['movies']), 2)
 
-        # Test series resource
         series_resource = server.server.get_resource_handler('/series')
         self.assertIsNotNone(series_resource, "Series resource not registered")
         result_series = series_resource()
         self.assertEqual(result_series['count'], 1)
         self.assertEqual(len(result_series['series']), 1)
+
+    def test_multi_instance_config(self):
+        """Test configuration with multiple Sonarr instances."""
+        config_data = {
+            "nasConfig": {"ip": "127.0.0.1", "port": "7878"},
+            "radarrConfig": {"apiKey": "radarr_key", "basePath": "/api/v3", "port": "7878"},
+            "sonarrConfigs": {
+                "sonarr": {"apiKey": "sonarr_key", "basePath": "/api/v3", "port": "8989"},
+                "sonarr_anime": {"apiKey": "anime_key", "basePath": "/api/v3", "port": "8990"}
+            },
+            "server": {"port": 3000}
+        }
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        with open(tmp.name, 'w') as f:
+            json.dump(config_data, f)
+
+        try:
+            from radarr_sonarr_mcp.config import load_config
+            config = load_config(tmp.name)
+
+            self.assertEqual(len(config.sonarr_configs), 2)
+            self.assertIn("sonarr", config.sonarr_configs)
+            self.assertIn("sonarr_anime", config.sonarr_configs)
+            self.assertEqual(config.sonarr_configs["sonarr"].api_key, "sonarr_key")
+            self.assertEqual(config.sonarr_configs["sonarr_anime"].api_key, "anime_key")
+            self.assertEqual(config.sonarr_configs["sonarr_anime"].port, "8990")
+            # Backward compat property
+            self.assertEqual(config.sonarr_config.api_key, "sonarr_key")
+        finally:
+            tmp.close()
+            os.unlink(tmp.name)
 
 
 if __name__ == '__main__':

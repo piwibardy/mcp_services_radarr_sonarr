@@ -3,11 +3,11 @@
 
 import json
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 from fastmcp import FastMCP
 
-from .config import Config, load_config
+from .config import Config, SonarrConfig, load_config
 from .services.radarr_service import RadarrService, Movie
 from .services.sonarr_service import SonarrService
 
@@ -15,13 +15,33 @@ from .services.sonarr_service import SonarrService
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Tool name mapping: instance name -> (get_tool_name, lookup_tool_name, content_label)
+SONARR_TOOL_NAMES = {
+    "sonarr": ("get_available_series", "lookup_series", "series"),
+    "sonarr_anime": ("get_available_anime", "lookup_anime", "anime"),
+}
+
+
+def _sonarr_tool_names(instance_name: str) -> tuple:
+    """Get tool names for a Sonarr instance. Falls back to generic naming."""
+    if instance_name in SONARR_TOOL_NAMES:
+        return SONARR_TOOL_NAMES[instance_name]
+    # Generic fallback for unknown instance names
+    safe = instance_name.replace("-", "_")
+    return (f"get_available_{safe}", f"lookup_{safe}", safe)
+
 
 # -----------------------------------------------------------------------------
 # Helper function to check watched status from multiple sources
 # -----------------------------------------------------------------------------
 
-def _is_watched_series(title: str, config: Config, sonarr_service: SonarrService) -> bool:
-    """Check if a series is watched using available media services."""
+def _is_watched_series(series, config: Config, sonarr_service: SonarrService) -> bool:
+    """Check if a series is watched using available media services.
+
+    ``series`` can be a Series object or a string title.  Jellyfin/Plex
+    checks use the title, while the Sonarr fallback needs the full object.
+    """
+    title = series.title if hasattr(series, "title") else series
     statuses = []
     if config.jellyfin_config.base_url:
         from .services.jellyfin_service import JellyfinService
@@ -46,7 +66,10 @@ def _is_watched_series(title: str, config: Config, sonarr_service: SonarrService
             logger.error(f"Plex check failed for {title}: {e}")
     if statuses:
         return any(statuses)
-    return sonarr_service.is_series_watched(title)
+    # Sonarr fallback needs the full Series object
+    if hasattr(series, "statistics"):
+        return sonarr_service.is_series_watched(series)
+    return False
 
 
 def _is_watched_movie(title: str, config: Config) -> bool:
@@ -87,83 +110,100 @@ class RadarrSonarrMCPServer:
         self.config = config
         self.server = FastMCP(
             name="radarr-sonarr-mcp-server",
-            description="MCP Server for Radarr and Sonarr media management",
         )
-        self.sonarr_service = SonarrService(config.sonarr_config)
+        self.sonarr_services: Dict[str, SonarrService] = {
+            name: SonarrService(cfg)
+            for name, cfg in config.sonarr_configs.items()
+        }
         self.radarr_service = RadarrService(config.radarr_config)
         self._register_tools()
-        self._register_resources()
 
     # ---- Tools ----
 
     def _register_tools(self):
-        @self.server.tool()
-        def get_available_series(
-            year: Optional[int] = None,
-            downloaded: Optional[bool] = None,
-            watched: Optional[bool] = None,
-            actors: Optional[str] = None,
-        ) -> str:
-            """Get a list of available TV series with optional filters.
+        # Register tools for each Sonarr instance
+        for instance_name, service in self.sonarr_services.items():
+            self._register_sonarr_tools(instance_name, service)
 
-            Watched status is determined using Plex and/or Jellyfin; if either
-            reports watched, the series is considered watched.
-            """
-            all_series = self.sonarr_service.get_all_series()
-            filtered = all_series
+        # Radarr tools (single instance)
+        self._register_radarr_tools()
 
-            if year is not None:
-                filtered = [s for s in filtered if s.year == year]
+    def _register_sonarr_tools(self, instance_name: str, service: SonarrService):
+        get_name, lookup_name, label = _sonarr_tool_names(instance_name)
+        config = self.config
 
-            if downloaded is not None:
-                filtered = [
-                    s for s in filtered
-                    if (s.statistics and s.statistics.episode_file_count > 0) == downloaded
-                ]
+        def _make_get_available(svc, lbl):
+            def get_available(
+                year: Optional[int] = None,
+                downloaded: Optional[bool] = None,
+                watched: Optional[bool] = None,
+                actors: Optional[str] = None,
+            ) -> str:
+                f"""Get a list of available {lbl} with optional filters."""
+                all_series = svc.get_all_series()
+                filtered = all_series
 
-            if watched is not None:
-                filtered = [
-                    s for s in filtered
-                    if _is_watched_series(s.title, self.config, self.sonarr_service) == watched
-                ]
+                if year is not None:
+                    filtered = [s for s in filtered if s.year == year]
 
-            if actors:
-                filtered = [
-                    s for s in filtered
-                    if s.data.get("credits") and any(
-                        actors.lower() in cast.get("name", "").lower()
-                        for cast in s.data.get("credits", {}).get("cast", [])
-                    )
-                ]
+                if downloaded is not None:
+                    filtered = [
+                        s for s in filtered
+                        if (s.statistics and s.statistics.episode_file_count > 0) == downloaded
+                    ]
 
-            return json.dumps({
-                "count": len(filtered),
-                "series": [
-                    {
-                        "id": s.id,
-                        "title": s.title,
-                        "year": s.year,
-                        "overview": s.overview,
-                        "status": s.status,
-                        "network": s.network,
-                        "genres": s.genres,
-                        "watched": _is_watched_series(s.title, self.config, self.sonarr_service),
-                    }
-                    for s in filtered
-                ],
-            })
+                if watched is not None:
+                    filtered = [
+                        s for s in filtered
+                        if _is_watched_series(s, config, svc) == watched
+                    ]
 
-        @self.server.tool()
-        def lookup_series(term: str) -> str:
-            """Look up TV series by search term."""
-            results = self.sonarr_service.lookup_series(term)
-            return json.dumps({
-                "count": len(results),
-                "series": [
-                    {"id": s.id, "title": s.title, "year": s.year, "overview": s.overview}
-                    for s in results
-                ],
-            })
+                if actors:
+                    filtered = [
+                        s for s in filtered
+                        if s.data.get("credits") and any(
+                            actors.lower() in cast.get("name", "").lower()
+                            for cast in s.data.get("credits", {}).get("cast", [])
+                        )
+                    ]
+
+                return json.dumps({
+                    "count": len(filtered),
+                    lbl: [
+                        {
+                            "id": s.id,
+                            "title": s.title,
+                            "year": s.year,
+                            "overview": s.overview,
+                            "status": s.status,
+                            "network": s.network,
+                            "genres": s.genres,
+                            "watched": _is_watched_series(s, config, svc),
+                        }
+                        for s in filtered
+                    ],
+                })
+            return get_available
+
+        def _make_lookup(svc, lbl):
+            def lookup(term: str) -> str:
+                f"""Look up {lbl} by search term."""
+                results = svc.lookup_series(term)
+                return json.dumps({
+                    "count": len(results),
+                    lbl: [
+                        {"id": s.id, "title": s.title, "year": s.year, "overview": s.overview}
+                        for s in results
+                    ],
+                })
+            return lookup
+
+        self.server.tool(name=get_name)(_make_get_available(service, label))
+        self.server.tool(name=lookup_name)(_make_lookup(service, label))
+
+    def _register_radarr_tools(self):
+        config = self.config
+        radarr_service = self.radarr_service
 
         @self.server.tool()
         def get_available_movies(
@@ -176,7 +216,7 @@ class RadarrSonarrMCPServer:
 
             Watched status is determined using Plex and/or Jellyfin.
             """
-            all_movies = self.radarr_service.get_all_movies()
+            all_movies = radarr_service.get_all_movies()
             filtered = all_movies
 
             if year is not None:
@@ -188,7 +228,7 @@ class RadarrSonarrMCPServer:
             if watched is not None:
                 filtered = [
                     m for m in filtered
-                    if _is_watched_movie(m.title, self.config) == watched
+                    if _is_watched_movie(m.title, config) == watched
                 ]
 
             if actors:
@@ -211,36 +251,11 @@ class RadarrSonarrMCPServer:
                         "hasFile": m.has_file,
                         "status": m.status,
                         "genres": m.genres or [],
-                        "watched": _is_watched_movie(m.title, self.config),
+                        "watched": _is_watched_movie(m.title, config),
                     }
                     for m in filtered
                 ],
             })
-
-    # ---- Resources ----
-
-    def _register_resources(self):
-        @self.server.resource("http://example.com/series", description="TV series collection from Sonarr")
-        def series() -> dict:
-            series_list = self.sonarr_service.get_all_series()
-            return {
-                "count": len(series_list),
-                "series": [
-                    {"id": s.id, "title": s.title, "year": s.year}
-                    for s in series_list
-                ],
-            }
-
-        @self.server.resource("http://example.com/movies", description="Movie collection from Radarr")
-        def movies() -> dict:
-            movies_list = self.radarr_service.get_all_movies()
-            return {
-                "count": len(movies_list),
-                "movies": [
-                    {"id": m.id, "title": m.title, "year": m.year}
-                    for m in movies_list
-                ],
-            }
 
     # ---- Run ----
 
@@ -249,6 +264,9 @@ class RadarrSonarrMCPServer:
         transport = self.config.server_config.transport
         port = self.config.server_config.port
         host = self.config.server_config.host
+
+        instances = ", ".join(self.sonarr_services.keys())
+        logger.info(f"Sonarr instances: {instances}")
 
         if transport == "streamable-http":
             logger.info(f"Starting Radarr-Sonarr MCP Server (HTTP) on {host}:{port}")
