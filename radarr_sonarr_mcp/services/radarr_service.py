@@ -10,6 +10,7 @@ from ..config import RadarrConfig
 class Movie:
     """Movie data class."""
     id: int
+    tmdb_id: int
     title: str
     year: int
     overview: str
@@ -18,13 +19,14 @@ class Movie:
     tags: List[int] = None
     genres: List[str] = None
     data: Dict[str, Any] = None
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Movie':
         """Create a Movie object from a dictionary."""
         return cls(
-            id=data['id'],
-            title=data['title'],
+            id=data.get('id', 0),
+            tmdb_id=data.get('tmdbId', 0),
+            title=data.get('title', ''),
             year=data.get('year', 0),
             overview=data.get('overview', ''),
             has_file=data.get('hasFile', False),

@@ -29,6 +29,7 @@ class Statistics:
 class Series:
     """TV Series data class."""
     id: int
+    tvdb_id: int
     title: str
     year: Optional[int]
     overview: str
@@ -38,17 +39,18 @@ class Series:
     genres: List[str]
     statistics: Optional[Statistics]
     data: Dict[str, Any]  # Store original data for reference
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Series':
         """Create a Series object from a dictionary."""
         statistics = None
         if 'statistics' in data:
             statistics = Statistics.from_dict(data['statistics'])
-        
+
         return cls(
-            id=data['id'],
-            title=data['title'],
+            id=data.get('id', 0),
+            tvdb_id=data.get('tvdbId', 0),
+            title=data.get('title', ''),
             year=data.get('year'),
             overview=data.get('overview', ''),
             status=data.get('status', ''),

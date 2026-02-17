@@ -49,6 +49,7 @@ class TestRadarrSonarrMCPServer(unittest.TestCase):
         self.sample_movies = [
             Movie(
                 id=1,
+                tmdb_id=101,
                 title="Test Movie 1",
                 year=2022,
                 overview="A test movie",
@@ -58,6 +59,7 @@ class TestRadarrSonarrMCPServer(unittest.TestCase):
                 tags=[1, 2],
                 data={
                     "id": 1,
+                    "tmdbId": 101,
                     "title": "Test Movie 1",
                     "year": 2022,
                     "overview": "A test movie",
@@ -75,6 +77,7 @@ class TestRadarrSonarrMCPServer(unittest.TestCase):
             ),
             Movie(
                 id=2,
+                tmdb_id=102,
                 title="Test Movie 2",
                 year=2023,
                 overview="Another test movie",
@@ -84,6 +87,7 @@ class TestRadarrSonarrMCPServer(unittest.TestCase):
                 tags=[2],
                 data={
                     "id": 2,
+                    "tmdbId": 102,
                     "title": "Test Movie 2",
                     "year": 2023,
                     "overview": "Another test movie",
@@ -103,6 +107,7 @@ class TestRadarrSonarrMCPServer(unittest.TestCase):
         self.sample_series = [
             Series(
                 id=1,
+                tvdb_id=201,
                 title="Test Series 1",
                 year=2022,
                 overview="A test series",

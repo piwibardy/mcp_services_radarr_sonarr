@@ -192,7 +192,13 @@ class RadarrSonarrMCPServer:
                 return json.dumps({
                     "count": len(results),
                     lbl: [
-                        {"id": s.id, "title": s.title, "year": s.year, "overview": s.overview}
+                        {
+                            "id": s.id,
+                            "tvdb_id": s.tvdb_id,
+                            "title": s.title,
+                            "year": s.year,
+                            "overview": s.overview,
+                        }
                         for s in results
                     ],
                 })
