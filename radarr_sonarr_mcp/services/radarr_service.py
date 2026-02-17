@@ -100,6 +100,107 @@ class RadarrService:
             logging.error(f"Error fetching movie file for ID {movie_id}: {e}")
             raise Exception(f"Failed to fetch movie file: {e}")
 
+    def get_quality_profiles(self) -> list:
+        """Fetch available quality profiles from Radarr."""
+        try:
+            response = requests.get(
+                f"{self.config.base_url}/qualityprofile",
+                params={"apikey": self.config.api_key},
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            import logging
+            logging.error(f"Error fetching quality profiles from Radarr: {e}")
+            raise Exception(f"Failed to fetch quality profiles: {e}")
+
+    def get_root_folders(self) -> list:
+        """Fetch available root folders from Radarr."""
+        try:
+            response = requests.get(
+                f"{self.config.base_url}/rootfolder",
+                params={"apikey": self.config.api_key},
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            import logging
+            logging.error(f"Error fetching root folders from Radarr: {e}")
+            raise Exception(f"Failed to fetch root folders: {e}")
+
+    def lookup_movie_by_tmdb(self, tmdb_id: int) -> dict:
+        """Lookup a movie by TMDB ID to get full metadata."""
+        try:
+            response = requests.get(
+                f"{self.config.base_url}/movie/lookup/tmdb",
+                params={"tmdbId": tmdb_id, "apikey": self.config.api_key},
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            import logging
+            logging.error(f"Error looking up TMDB ID {tmdb_id}: {e}")
+            raise Exception(f"Failed to lookup movie by TMDB ID: {e}")
+
+    def add_movie(
+        self,
+        tmdb_id: int,
+        quality_profile_id: int,
+        root_folder_path: str,
+        monitored: bool = True,
+        search_for_movie: bool = False,
+        minimum_availability: str = "announced",
+        tags: list = None,
+    ) -> dict:
+        """Add a movie to Radarr via POST /api/v3/movie."""
+        import logging
+        movie_data = self.lookup_movie_by_tmdb(tmdb_id)
+
+        payload = {
+            "tmdbId": tmdb_id,
+            "title": movie_data.get("title"),
+            "qualityProfileId": quality_profile_id,
+            "rootFolderPath": root_folder_path,
+            "monitored": monitored,
+            "minimumAvailability": minimum_availability,
+            "year": movie_data.get("year"),
+            "images": movie_data.get("images", []),
+            "addOptions": {
+                "searchForMovie": search_for_movie,
+            },
+            "tags": tags or [],
+        }
+
+        try:
+            response = requests.post(
+                f"{self.config.base_url}/movie",
+                params={"apikey": self.config.api_key},
+                json=payload,
+                timeout=30
+            )
+            if response.status_code == 400:
+                error_data = response.json()
+                if any("MovieExistsValidator" in str(e) for e in error_data):
+                    raise ValueError("Movie already exists in Radarr")
+                raise ValueError(f"Bad request: {error_data}")
+            response.raise_for_status()
+            result = response.json()
+            return {
+                "success": True,
+                "movie_id": result.get("id", 0),
+                "title": result.get("title"),
+                "path": result.get("path"),
+                "message": "Movie added successfully",
+            }
+        except ValueError:
+            raise
+        except requests.RequestException as e:
+            logging.error(f"Error adding movie {tmdb_id} to Radarr: {e}")
+            raise Exception(f"Failed to add movie: {e}")
+
     def is_movie_watched(self, movie: Movie) -> bool:
         """Check if a movie is watched based on tags."""
         # This is an assumption - actual implementation may vary based on how

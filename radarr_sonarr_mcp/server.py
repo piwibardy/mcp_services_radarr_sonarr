@@ -15,10 +15,16 @@ from .services.sonarr_service import SonarrService
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Tool name mapping: instance name -> (get_tool_name, lookup_tool_name, content_label)
+# Tool name mapping: instance name -> (get, lookup, label, quality_profiles, root_folders, add)
 SONARR_TOOL_NAMES = {
-    "sonarr": ("get_available_series", "lookup_series", "series"),
-    "sonarr_anime": ("get_available_anime", "lookup_anime", "anime"),
+    "sonarr": (
+        "get_available_series", "lookup_series", "series",
+        "get_sonarr_quality_profiles", "get_sonarr_root_folders", "add_series_to_sonarr",
+    ),
+    "sonarr_anime": (
+        "get_available_anime", "lookup_anime", "anime",
+        "get_anime_quality_profiles", "get_anime_root_folders", "add_anime_to_sonarr",
+    ),
 }
 
 
@@ -26,9 +32,11 @@ def _sonarr_tool_names(instance_name: str) -> tuple:
     """Get tool names for a Sonarr instance. Falls back to generic naming."""
     if instance_name in SONARR_TOOL_NAMES:
         return SONARR_TOOL_NAMES[instance_name]
-    # Generic fallback for unknown instance names
     safe = instance_name.replace("-", "_")
-    return (f"get_available_{safe}", f"lookup_{safe}", safe)
+    return (
+        f"get_available_{safe}", f"lookup_{safe}", safe,
+        f"get_{safe}_quality_profiles", f"get_{safe}_root_folders", f"add_{safe}",
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -129,7 +137,7 @@ class RadarrSonarrMCPServer:
         self._register_radarr_tools()
 
     def _register_sonarr_tools(self, instance_name: str, service: SonarrService):
-        get_name, lookup_name, label = _sonarr_tool_names(instance_name)
+        get_name, lookup_name, label, quality_profiles_name, root_folders_name, add_name = _sonarr_tool_names(instance_name)
         config = self.config
 
         def _make_get_available(svc, lbl):
@@ -204,8 +212,57 @@ class RadarrSonarrMCPServer:
                 })
             return lookup
 
+        def _make_quality_profiles(svc):
+            def get_quality_profiles() -> str:
+                """List available quality profiles."""
+                profiles = svc.get_quality_profiles()
+                return json.dumps({
+                    "profiles": [{"id": p["id"], "name": p["name"]} for p in profiles],
+                })
+            return get_quality_profiles
+
+        def _make_root_folders(svc):
+            def get_root_folders() -> str:
+                """List available root folders."""
+                folders = svc.get_root_folders()
+                return json.dumps({
+                    "folders": [
+                        {"id": f["id"], "path": f["path"], "freeSpace": f.get("freeSpace", 0)}
+                        for f in folders
+                    ],
+                })
+            return get_root_folders
+
+        def _make_add_series(svc, lbl):
+            def add_series(
+                tvdb_id: int,
+                quality_profile_id: int,
+                root_folder_path: str,
+                monitor: str = "all",
+                season_folder: bool = True,
+                search_for_missing_episodes: bool = False,
+                search_for_cutoff_unmet_episodes: bool = False,
+                series_type: str = "standard",
+            ) -> str:
+                f"""Add a {lbl} to Sonarr by TVDB ID."""
+                result = svc.add_series(
+                    tvdb_id=tvdb_id,
+                    quality_profile_id=quality_profile_id,
+                    root_folder_path=root_folder_path,
+                    monitor=monitor,
+                    season_folder=season_folder,
+                    search_for_missing_episodes=search_for_missing_episodes,
+                    search_for_cutoff_unmet_episodes=search_for_cutoff_unmet_episodes,
+                    series_type=series_type,
+                )
+                return json.dumps(result)
+            return add_series
+
         self.server.tool(name=get_name)(_make_get_available(service, label))
         self.server.tool(name=lookup_name)(_make_lookup(service, label))
+        self.server.tool(name=quality_profiles_name)(_make_quality_profiles(service))
+        self.server.tool(name=root_folders_name)(_make_root_folders(service))
+        self.server.tool(name=add_name)(_make_add_series(service, label))
 
     def _register_radarr_tools(self):
         config = self.config
@@ -262,6 +319,63 @@ class RadarrSonarrMCPServer:
                     for m in filtered
                 ],
             })
+
+        @self.server.tool()
+        def get_radarr_quality_profiles() -> str:
+            """List available quality profiles in Radarr."""
+            profiles = radarr_service.get_quality_profiles()
+            return json.dumps({
+                "profiles": [{"id": p["id"], "name": p["name"]} for p in profiles],
+            })
+
+        @self.server.tool()
+        def get_radarr_root_folders() -> str:
+            """List available root folders in Radarr."""
+            folders = radarr_service.get_root_folders()
+            return json.dumps({
+                "folders": [
+                    {"id": f["id"], "path": f["path"], "freeSpace": f.get("freeSpace", 0)}
+                    for f in folders
+                ],
+            })
+
+        @self.server.tool()
+        def lookup_movie(term: str) -> str:
+            """Look up movies by search term in the TMDB catalogue."""
+            results = radarr_service.lookup_movie(term)
+            return json.dumps({
+                "count": len(results),
+                "movies": [
+                    {
+                        "id": m.id,
+                        "tmdb_id": m.tmdb_id,
+                        "title": m.title,
+                        "year": m.year,
+                        "overview": m.overview,
+                    }
+                    for m in results
+                ],
+            })
+
+        @self.server.tool()
+        def add_movie_to_radarr(
+            tmdb_id: int,
+            quality_profile_id: int,
+            root_folder_path: str,
+            monitored: bool = True,
+            search_for_movie: bool = False,
+            minimum_availability: str = "announced",
+        ) -> str:
+            """Add a movie to Radarr by TMDB ID."""
+            result = radarr_service.add_movie(
+                tmdb_id=tmdb_id,
+                quality_profile_id=quality_profile_id,
+                root_folder_path=root_folder_path,
+                monitored=monitored,
+                search_for_movie=search_for_movie,
+                minimum_availability=minimum_availability,
+            )
+            return json.dumps(result)
 
     # ---- Run ----
 
